@@ -1,4 +1,6 @@
-# MDX Deck + Code Surfer template
+# Mojo::UserAgent::Role::Queued talk
+
+See github pages for the talk itself
 
 This project was generated with the `npm init code-surfer-deck` command.
 
