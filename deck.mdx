@@ -3,8 +3,8 @@ import {
   CodeSurferColumnLayout,
 } from "code-surfer";
 import "prismjs/components/prism-perl";
-export { dark as theme } from "code-surfer";
-import { Reveal, Image, Notes } from "mdx-deck";
+export { nightOwl as theme } from "code-surfer";
+import { Appear, Image, Notes } from "mdx-deck";
 
 ## Mojo::UserAgent::Role::Queued
 
@@ -264,6 +264,35 @@ sub _process {
 }
 
 ```
+```perl 21:24 subtitle="cleanup when queue is empty"
+
+has max_active => sub { shift->max_connections };
+
+sub _process {
+  my ($self, $original_start) = @_;
+  state $start //= $original_start;
+  state $active //= 0;
+  # we have jobs and can run them:
+  while ($active < $self->max_active
+    and my $job = shift @{$self->{'jobs'}})
+  {
+    my ($tx, $cb) = ($job->{tx}, $job->{cb});
+    $active++;
+    $start->( $self, $tx,
+              sub {
+                    my ($ua, $tx) = @_;
+                    $active--;
+                    $cb->($ua, $tx);
+                    $ua->_process();
+        });
+  }
+  if (scalar @{$self->{'jobs'}} == 0 && $active == 0) {
+    $self->emit('stop_queue');
+    $self->_stop_queue();    # the timer shouldn't run STAM.
+  }
+}
+
+```
 ```perl 13:14 subtitle="Improvement: use the finish event of Mojo::Transaction for cleanup"
 
 has max_active => sub { shift->max_connections };
@@ -366,19 +395,88 @@ sub _enqueue {
 
 ---
 
+<CodeSurferLayout>
+
+```perl
+
+my $ua = Mojo::UserAgent->new->with_roles('+Queued');
+
+$ua->max_active(5); # process up to 5 requests at a time
+   for my $url (@big_list_of_urls) {
+   $ua->get($url, sub {
+           my ($ua, $tx) = @_;
+           if ($tx->success) {
+               say "Page at $url is titled: ",
+                 $tx->res->dom->at('title')->text;
+           }
+          });
+  };
+  # works with promises, too:
+ my @p = map {
+   $ua->get_p($_)->then(sub { pop->res->dom->at('title')->text })
+     ->catch(sub { say "Error: ", @_ })
+ } @big_list_of_urls;
+  Mojo::Promise->all(@p)->wait;
+```
+
+</CodeSurferLayout>
+
+---
+
 # BUGS
 
 ---
 
 <video autoplay muted loop controls>
 <source src="process.webm" type="video/webm" />
+<source src="https://raw.githubusercontent.com/dotandimet/MUARQ/master/process.webm" type="video/webm" />
 oh noes, no video
 </video>
 
 ---
+<CodeSurferLayout>
+
+```
+
+my $ua = Mojo::UserAgent->new->with_roles('+Queued');
+
+
+```
+```perl 1:4
+
+my $ua = Mojo::UserAgent->new->with_roles('+Queued');
+$ua->get(..., sub {
+
+})
+
+
+```
+```perl 1:4
+
+my $ua = Mojo::UserAgent->new->with_roles('+Queued');
+$ua->get(..., sub {
+ # 💣💣💣
+})
+
+
+```
+```perl 1:6
+
+my $ua = Mojo::UserAgent->new->with_roles('+Queued');
+$ua->get(..., sub {
+ # 💣💣💣
+})
+
+# 😭😭😭
+
+```
+</CodeSurferLayout>
+
+---
 
 # Bug 1: "private" methods
-## There are no private methods in Perl, and all subs are package globals
+  * There are no private methods in Perl
+  * All subs are package globals
 
 ---
 
@@ -414,7 +512,7 @@ my $_enqueue = sub {
 
 
 ```
-```perl 4,7[47:61],15[10:24] title="memory leak!" subtitle="(circular reference)"
+```perl 4,7[23:27,47:61,65],15[10:24] title="Memory leak!" subtitle="closure closes over reference to sub"
 
 # Private methods:
 
@@ -424,7 +522,6 @@ $_process_queue = sub {
   ...
     $tx->on(finish => sub { $active--; $self->$_process_queue() });
   ...
-  }
 };
 
 my $_enqueue = sub {
@@ -435,8 +532,7 @@ my $_enqueue = sub {
 
 
 ```
-```perl 4,5,7[47:61],15[10:24] title="memory leak!" subtitle="workaround: pass reference to self as parameter"
-
+```perl 4,5,7[47:61],15[10:24] title="Memory Leak" subtitle="workaround: pass reference to sub as parameter"
 # Private methods:
 
 my $_process_queue;
@@ -445,7 +541,6 @@ $_process_queue = sub {
   ...
     $tx->on(finish => sub { $active--; $self->$this_sub() });
   ...
-  }
 };
 
 my $_enqueue = sub {
@@ -460,20 +555,286 @@ my $_enqueue = sub {
 
 ---
 
+# Nice?
+## No, gross
+
+---
+
+# Let's hide all this mess in a seperate class
+
+---
+
+<CodeSurferLayout>
+
+```perl
+package Mojo::UserAgent::Role::Queued;
+use Mojo::Base '-role';
+use Scalar::Util 'weaken';
+
+our $VERSION = "1.01";
+
+has max_active => sub { shift->max_connections };
+
+# Private methods:
+
+my $_process_queue = sub {
+  my ($self, $original_start, $ref_to_this_sub) = @_;
+  state $start //= $original_start;
+  state $active //= 0;
+  # we have jobs and can run them:
+  while ($active < $self->max_active
+    and my $job = shift @{$self->{'jobs'}})
+  {
+    my ($tx, $cb) = ($job->{tx}, $job->{cb});
+    $active++;
+    weaken $self;
+    $tx->on(finish => sub { $active--; $self->$ref_to_this_sub() });
+    $start->( $self, $tx, $cb );
+  }
+  if (scalar @{$self->{'jobs'}} == 0 && $active == 0) {
+    $self->emit('queue_empty');
+  }
+};
+
+my $_enqueue = sub {
+  my ($self, $original_start, $job) = @_;
+  $self->{'jobs'} ||= [];
+  push @{$self->{'jobs'}}, $job;
+  $self->$_process_queue($original_start, $_process_queue);
+};
+
+
+around start => sub {
+  my ($orig, $self, $tx, $cb) = @_;
+  if ($cb) {
+    $self->$_enqueue($orig, {tx => $tx, cb => $cb});
+  }
+  else {
+    return $orig->($self, $tx); # Blocking calls skip the queue
+  }
+};
+
+
+```
+```perl
+package Mojo::UserAgent::Role::Queued;
+use Mojo::Base '-role';
+use Scalar::Util 'weaken';
+
+our $VERSION = "1.10";
+use Mojo::UserAgent::Role::Queued::Queue;
+
+has max_active => sub { shift->max_connections };
+
+around start => sub {
+  my ($orig, $self, $tx, $cb) = @_;
+  state $queue //= Mojo::UserAgent::Role::Queued::Queue->new(
+    max_active => $self->max_active,
+    callback   => sub { $self->$orig(@_); }
+  );
+  if ($cb) {
+    $tx->on(finish => sub { $queue->tx_finish(); });
+    $queue->on( queue_empty => sub { $self->emit('queue_empty') });
+    $queue->enqueue([$tx, $cb]);
+  }
+  else {
+    return $orig->($self, $tx);    # Blocking calls skip the queue
+  }
+};
+
+```
+
+```perl
+package Mojo::UserAgent::Role::Queued::Queue;
+
+use strict;
+use warnings;
+
+use Mojo::Base 'Mojo::EventEmitter';
+
+has jobs => sub { [] };
+has active => 0;
+has max_active => 4;
+has callback => sub { return sub { die "No Method set!"; } };
+
+
+sub process {
+   my ($self) = @_;
+  # we have jobs and can run them:
+  while ($self->active < $self->max_active
+    and my $job = shift @{$self->jobs})
+  {
+    $self->active($self->active + 1);
+    $self->callback->( @$job );
+  }
+  if (scalar @{$self->jobs} == 0 && $self->active == 0) {
+    $self->emit('queue_empty');
+  }
+}
+
+sub tx_finish {
+    my ($self) = @_;
+    $self->active($self->active - 1);
+    $self->process();
+}
+
+sub enqueue {
+    my ($self, $job) = @_;
+    push @{$self->jobs}, $job;
+    $self->process();
+}
+
+```
+
+</CodeSurferLayout>
+
+---
 # Bug 3
 ## Singleton
 
 ---
 
-2018-09-11T11:34:01 0 <lt;tyldis> Dang it, it's Mojo::UserAgent::Role::Queued causing me headaches... Seems to be some scoping issue
-2018-09-11T11:42:25 0 <lt;batman> tyldis: I don't get how that module can work at all :(  
-https://metacpan.org/source/DOTAN/Mojo-UserAgent-Role-Queued-1.10/lib/Mojo/UserAgent/Role/Queued.pm#L12
-2018-09-11T11:45:05 0 <lt;batman> tyldis: just to elaborate... What I don't understand is that the "callback" inside the state variable closes over $self, so how is it supposed to work correctly if you have many instances of Mojo::UserAgent?
-2018-09-11T11:45:08 1 <lt;batman> dotan_convos: ^
-2018-09-11T11:50:26 0 <lt;sri> batman: yea, that's definitely borked
-2018-09-11T11:51:05 0 <lt;sri> prolly wasn't tested with more than one ua
+### 2018-09-11T11:34:01 [tyldis]
+Dang it, it's Mojo::UserAgent::Role::Queued causing me headaches...
+Seems to be some scoping issue
 
 ---
+
+### 2018-09-11T11:42:25 [batman]
+tyldis: I don't get how that module can work at all :(
+https://metacpan.org/source/DOTAN/Mojo-UserAgent-Role-Queued-1.10/lib/Mojo/UserAgent/Role/Queued.pm#L12
+
+---
+
+<CodeSurferLayout>
+
+```perl 12:14
+package Mojo::UserAgent::Role::Queued;
+use Mojo::Base '-role';
+use Scalar::Util 'weaken';
+
+our $VERSION = "1.10";
+use Mojo::UserAgent::Role::Queued::Queue;
+
+has max_active => sub { shift->max_connections };
+
+around start => sub {
+  my ($orig, $self, $tx, $cb) = @_;
+  state $queue //= Mojo::UserAgent::Role::Queued::Queue->new(
+    max_active => $self->max_active,
+    callback   => sub { $self->$orig(@_); }
+  );
+  if ($cb) {
+    $tx->on(finish => sub { $queue->tx_finish(); });
+    $queue->on( queue_empty => sub { $self->emit('queue_empty') });
+    $queue->enqueue([$tx, $cb]);
+  }
+  else {
+    return $orig->($self, $tx);    # Blocking calls skip the queue
+  }
+};
+
+```
+
+</CodeSurferLayout>
+
+---
+
+### 2018-09-11T11:45:05 [batman]
+tyldis: just to elaborate... What I don't understand is that the "callback" inside the
+state variable closes over $self, so how is it supposed to work correctly if you have many instances of Mojo::UserAgent?
+
+---
+
+### 2018-09-11T11:45:08 [batman]
+dotan_convos: ^
+
+---
+
+### 2018-09-11T11:50:26 [sri]
+batman: yea, that's definitely borked
+### 2018-09-11T11:51:05 [sri]
+prolly wasn't tested with more than one ua
+
+---
+
+# 😭 ??? 😭
+
+---
+
+# MORE than one ? 😳 🤯 🤔
+
+---
+
+# FYI
+
+* state $var makes singletons (global var for the process)
+
+---
+
+<CodeSurferLayout>
+
+```perl
+package Mojo::UserAgent::Role::Queued;
+use Mojo::Base '-role';
+use Scalar::Util 'weaken';
+
+our $VERSION = "1.10";
+use Mojo::UserAgent::Role::Queued::Queue;
+
+has max_active => sub { shift->max_connections };
+
+around start => sub {
+  my ($orig, $self, $tx, $cb) = @_;
+  state $queue //= Mojo::UserAgent::Role::Queued::Queue->new(
+    max_active => $self->max_active,
+    callback   => sub { $self->$orig(@_); }
+  );
+  if ($cb) {
+    $tx->on(finish => sub { $queue->tx_finish(); });
+    $queue->on( queue_empty => sub { $self->emit('queue_empty') });
+    $queue->enqueue([$tx, $cb]);
+  }
+  else {
+    return $orig->($self, $tx);    # Blocking calls skip the queue
+  }
+};
+
+```
+
+```perl
+package Mojo::UserAgent::Role::Queued;
+use Mojo::Base '-role';
+
+our $VERSION = "1.11";
+use Mojo::UserAgent::Role::Queued::Queue;
+
+has max_active => sub { shift->max_connections };
+
+has queue => sub {
+  Mojo::UserAgent::Role::Queued::Queue->new(max_active => shift->max_active);
+};
+
+around start => sub {
+  my ($orig, $self, $tx, $cb) = @_;
+  $self->queue->callback(sub { $self->$orig(@_) })
+    unless ($self->queue->callback);
+  if ($cb) {
+    $tx->on(finish => sub { $self->queue->tx_finish(); });
+    $self->queue->on(queue_empty => sub { $self->emit('queue_empty') });
+    $self->queue->enqueue([$tx, $cb]);
+  }
+  else {
+    return $orig->($self, $tx);    # Blocking calls skip the queue
+  }
+};
+
+
+```
+</CodeSurferLayout>
+
+---
+
 
 I put this in a sub class
 
