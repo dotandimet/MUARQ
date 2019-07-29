@@ -85,6 +85,11 @@ Network IO time vs. CPU time
 
 ---
 
+* Given system support for non-blocking IO (epoll, kqueue, libev, libuv),
+a single process can have networking superpowers (nginx, node, mojolicious)
+
+---
+
 ## Mojo::IOLoop
 
   * Check Timers
@@ -118,6 +123,40 @@ Network IO time vs. CPU time
 <CodeSurferLayout>
 
 ```perl subtitle="rate-limiting example" 
+
+use Mojo::UserAgent;
+use Mojo::IOLoop;
+
+my @urls = ( 'mojolicious.org/perldoc/Mojo/DOM', ...);
+
+my $ua = Mojo::UserAgent->new(max_redirects => 5);
+
+# Use a delay to keep the event loop running until we are done
+my $delay = Mojo::IOLoop->delay;
+my $fetch;
+$fetch = sub {
+
+  # Stop if there are no more URLs
+  return unless my $url = shift @urls;
+
+  # Fetch the next title
+  my $end = $delay->begin;
+  $ua->get($url => sub {
+    my ($ua, $tx) = @_;
+    say "$url: ", $tx->result->dom->at('title')->text;
+
+    # Next request
+    $fetch->();
+    $end->();
+  });
+};
+
+# Process two requests at a time
+$fetch->() for 1 .. 2;
+$delay->wait;
+
+```
+```perl subtitle="fetch a url until none left" 4,11:16,18:23,25:26
 
 use Mojo::UserAgent;
 use Mojo::IOLoop;
@@ -223,7 +262,8 @@ $delay->wait;
 
 ---
 
-# Complex
+# Elegant
+## Complex
 ## Not very reusable
 ## Can we package that up?
 
@@ -259,19 +299,14 @@ Enter: Roles
 </Notes>
 
 ## Roles
- Starting with Mojolicious version 7.41 (August 2017), all classes in the Mojolicious framework got Role support via `Role::Tiny`.
-
---- 
-## Roles
- - Dynamic multiple inheritance: compose class + role(s) to create custom sub-class
- - Error if two different roles add a new method with the same name
- - `Class::Method::Modifiers` lets us wrap a method so that multiple overrides can co-exist
+ * Starting with Mojolicious version 7.41 (August 2017), all classes in the Mojolicious framework got Role support via `Role::Tiny`.
+ * Roles = subclass construction kit
 
 ---
 
 <CodeSurferLayout>
 
-```perl
+```perl subtitle="with_roles composes (Mojo::UserAgent::Role::)Queued with base class"
 
 my $ua = Mojo::UserAgent->new->with_roles('+Queued');
 
@@ -328,7 +363,7 @@ around start => sub {
 };
 
 ```
-```perl 5[26:28],6[7:9],7[46:48] subtitle="queue only if passed a callback (non-blocking call)" 
+```perl 6,8,9:11 subtitle="pass through if not callback (non-blocking call)" 
 
 package Mojo::UserAgent::Role::Queued;
 use Mojo::Base '-role';
@@ -344,7 +379,7 @@ around start => sub {
 };
 
 ```
-```perl 7[20:49] subtitle="queue only if passed a callback (non-blocking call)" 
+```perl 7 subtitle="queue transaction if passed a callback" 
 
 package Mojo::UserAgent::Role::Queued;
 use Mojo::Base '-role';
