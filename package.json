@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "scripts": {
     "start": "mdx-deck deck.mdx",
-    "build": "mdx-deck build deck.mdx",
+    "build": "mdx-deck build deck.mdx && cp *.webm dist/",
     "test": "echo \"there are no tests\""
   },
   "devDependencies": {
