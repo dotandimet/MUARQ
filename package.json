@@ -10,7 +10,7 @@
     "code-surfer": "2.0.0-alpha.8",
     "mdx-deck": "2.4.0",
     "raw-loader": "3.0.0",
-    "prismjs": "1.23.0",
+    "prismjs": "1.24.0",
     "rebass": "3.1.2",
     "styled-components": "^4.3.2"
   },
