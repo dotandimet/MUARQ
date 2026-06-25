@@ -1,6 +1,6 @@
 # Mojo::UserAgent::Role::Queued talk
 
-See github pages for the talk itself
+See [mojo-ua-role-queued.netlify.app](https://mojo-ua-role-queued.netlify.app) for the presentation itself
 
 This project was generated with the `npm init code-surfer-deck` command.
 
